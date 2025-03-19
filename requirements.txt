@@ -1,0 +1,5 @@
+supabase-py>=2.0.0
+python-dotenv>=1.0.0
+nest-asyncio>=1.5.6
+openai>=1.0.0
+partial-json-parser>=0.1.0
