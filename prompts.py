@@ -43,73 +43,30 @@ You are assisting the user in developing a workflow. Your task is to interpret t
 Your goal is to facilitate an efficient and accurate workflow development process for the user.
 """
 
-fake_get_action_prompt_template = """
-Your task is to creatively imagine and generate a sequence of browser 
-actions to complete the workflow steps. These actions are purely 
-imaginary (for testing/mocking), so you can freely invent details. 
 
-You must produce a JSON object with the following five fields:
-1. command (click, scroll, type, or navigate)
-2. command_params (details about how to execute the command)
-4. current_workflow_step (the workflow step this action addresses)
-5. done (a boolean indicating whether the workflow is finished)
+code_system_prompt = """
+You are a senior software engineer.
+You are given a code and a user's latest request.
+You need to make changes to the code based on the user's latest request.
+You only need to address the most recent request.
+Only output the python code, no other text. DO NOT REPLY TO THE USER.
+Do not include any other text or comments or enclose the code in ```python or ```.
 
-Important:
-• Generate 1-2 actions per workflow step.  Move through the workflow steps in order.
-• After you have produced a few actions (3-5 total), you must set "done": true.
-• Do not exceed 5 total actions. If you have already created 5 actions and more are needed, set "done": true anyway, meaning you are concluding the workflow.
-• Never perform two identical commands in a row.
+Follow the user's instructions including if they tell you to rewrite the code.
 
-Here is an example JSON object:
-
-{{
-    "command": "click",
-    "command_params": '{{"x": 100, "y": 200}}',
-    "current_workflow_step": "ef345x9",
-    "done": false
-}}
-
-Everything is hypothetical, so you are free to elaborate creatively. 
-Below are the workflow steps and the run_messages you have emitted up until this point.
-Do not repeat the previous command.
-Since this is a mockup, you should expect all the result messages to be empty.
-
-Please generate exactly one action in JSON format, and remember to set 
-"done": true once you've reached your final action or approach around 
-ten total actions.
-
-Workflow steps:
-{workflow_steps}
-
-Run messages:
-{run_messages}
+Your code should be an example data processing workflow. It should obey the following requirements:
+- It has a mock_get_user_inputs function (which returns mock inputs)
+- Every other important function uses the @mock decorator
+- It has a main() function that ties everything together
 """
 
-# Structured output schema for OpenAI based on the fake_get_action_prompt_template
-browser_action_schema = {
-    "format": {
-        "type": "json_schema",
-        "name": "browser_action",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "enum": ["click", "scroll", "type", "navigate"]
-                },
-                "command_params": {
-                    "type": "string",
-                },
-                "current_workflow_step": {
-                    "type": "string"
-                },
-                "done": {
-                    "type": "boolean",
-                }
-            },
-            "required": ["command", "command_params", "current_workflow_step", "done"],
-            "additionalProperties": False
-        },
-        "strict": True
-    }
-}
+code_code_prompt_template = """
+<system>
+Make changes to the code based on the user's latest request.
+You only need to address the most recent request.
+Only output the code, no other text. DO NOT REPLY TO THE USER.
+
+The current code is:
+{code}
+</system>
+"""

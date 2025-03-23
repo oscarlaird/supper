@@ -19,13 +19,11 @@ from browser_use import BrowserConfig
 import asyncio
 import nest_asyncio 
 from dotenv import load_dotenv
-import watchdog.events
-import watchdog.observers
 
 load_dotenv()
 nest_asyncio.apply()
 config = BrowserConfig(
-    cdp_url="ws://0.0.0.0:9223/playwright?sessionId=4c44a102-1f6d-4e85-86ea-d049c40f5761"
+    cdp_url="ws://0.0.0.0:9223/playwright"
     
 )
 browser = Browser(config=config)
@@ -265,105 +263,46 @@ async def main():
             print("RUN MESSAGE", record)
             sender_type = record['sender_type']
             type = record['type']
-            if sender_type == "extension" and type != "abort":
+            if sender_type == "extension" and type != "abort":  # type is extension_loaded or result
+                print("run_message from extension", record)
+                # query all the workflow steps for this chat
                 workflow_steps = await get_workflow_steps(supabase, record['chat_id'])
-                task = ""
-                for step in workflow_steps:
-                    task += step["description"] + "\n"
-                
+                # query the run history for this run id
                 run_id = record['run_id']
-                # Clean up logs directory before starting
-                log_dir = "logs"
-                for file in os.listdir(log_dir):
-                    if file.endswith('.txt'):
-                        os.remove(os.path.join(log_dir, file))
-                browser_context = await browser.new_context()
-
-                await browser_context.switch_to_tab(0)
-                agent = Agent(
-                    task=task + "IMPORTANT: Just use GO TO URL to navigate the page and don't open new tabs. Note: after email is entered in gmail it may pop up the same email and ask to click it again.", #The available tabs are wrong and the tab ids are 1+ whatever the id is. Keep this in mind while switching tabs.", #+"IMPORTANT: Load the first page within the first tab. Don't open new tab initially. When new tab is added it's index will be 2 and so on.",
-                    llm=ChatOpenAI(model="gpt-4o"),
-                    browser=browser,
-                    save_conversation_path="logs/conversation"  
+                print("run_id", run_id)
+                result = await supabase.table("run_messages").select("type,payload").eq("run_id", run_id).execute()
+                run_messages = result.data if result.data else []
+                # get the browser action from openai
+                prompt_message_content = prompts.fake_get_action_prompt_template.format(workflow_steps=workflow_steps, run_messages=run_messages)
+                print("prompt_message_content", prompt_message_content)
+                prompt_message = {"role": "user", "content": prompt_message_content}
+                time.sleep(2)
+                response = await client.responses.create(
+                    model=MODEL,
+                    input=[prompt_message],
+                    stream=False
                 )
-
-                # Set up file system event handler
-                class LogHandler(watchdog.events.FileSystemEventHandler):
-                    def __init__(self, supabase_client, run_id, queue):
-                        self.supabase = supabase_client
-                        self.run_id = run_id
-                        self.queue = queue
-                        super().__init__()
-
-                    async def process_log_file(self, file_path):
-                        try:
-                            with open(file_path, 'r') as f:
-                                content = f.read()
-                                if 'RESPONSE' in content:
-                                    response_data = json.loads(content.split('RESPONSE\n')[1])
-                                    print("response_data", response_data)
-                                    # Update run message with current state and action
-                                    await self.supabase.table("run_messages").insert({
-                                        "run_id": self.run_id,
-                                        "type": "command",
-                                        "sender_type": "backend",
-                                        "display_text": response_data["current_state"]["next_goal"],
-                                        "payload": {
-                                            "current_state": response_data["current_state"],
-                                            "action": response_data["action"]
-                                        }
-                                    }).execute()
-
-                                    # If task is complete, send final message
-                                    if "done" in response_data["action"][0]:
-                                        await self.supabase.table("run_messages").insert({
-                                            "run_id": self.run_id,
-                                            "type": "result",
-                                            "sender_type": "backend",
-                                            "display_text": "Task completed successfully",
-                                            "payload": response_data["action"][0]["done"]
-                                        }).execute()
-                                        
-                                        # Update run status
-                                        await self.supabase.table("runs").update({
-                                            "in_progress": False
-                                        }).eq("id", self.run_id).execute()
-
-                        except Exception as e:
-                            print(f"Error processing log file: {e}")
-
-                    def on_created(self, event):
-                        if event.is_directory:
-                            return
-                        if event.src_path.endswith('.txt'):
-                            self.queue.put_nowait(event.src_path)
-
-                # Set up async queue and worker
-                queue = asyncio.Queue()
-                
-                async def process_queue():
-                    while True:
-                        file_path = await queue.get()
-                        await event_handler.process_log_file(file_path)
-                        queue.task_done()
-
-                # Start the queue processor
-                queue_processor = asyncio.create_task(process_queue())
-
-                # Set up the observer
-                path = "logs"
-                event_handler = LogHandler(supabase, run_id, queue)
-                observer = watchdog.observers.Observer()
-                observer.schedule(event_handler, path, recursive=False)
-                observer.start()
-
-                # Run the agent
-                result = await agent.run()
-                print("result", result)
-
-                # Stop the observer
-                observer.stop()
-                observer.join()
+                command = response.output_text
+                command = json.loads(command)
+                print("command", command)
+                # post the browser action to run_messages
+                await supabase.table("run_messages").insert({
+                    "run_id": run_id,
+                    "chat_id": record['chat_id'],
+                    "type": "command" if not command["done"] else "close_extension",
+                    "sender_type": "backend",
+                    "display_text": f"Requesting extension to execute command",
+                    "payload": command
+                }).execute()
+                # set the workflow step status to active
+                await supabase.table("workflow_steps").update({
+                    "status": "active"
+                }).eq("id", command["current_workflow_step"]).execute()
+                # set the run to in_progress=false if done
+                if command["done"]:
+                    await supabase.table("runs").update({
+                        "in_progress": False
+                    }).eq("id", run_id).execute()
 
         except (KeyError, TypeError) as e:
             print(f"Error processing message: {e}")
@@ -372,12 +311,10 @@ async def main():
     # Create a wrapper that handles the async callback properly
     def handle_record(payload):
         asyncio.create_task(on_new_record(payload))
-        return
     def handle_new_run(payload):
         asyncio.create_task(on_new_run(payload))
     def handle_run_message(payload):
         asyncio.create_task(on_run_message(payload))
-        return
     
     # Subscribe to changes using the async realtime client
     messages_channel = supabase.realtime.channel("messages-changes")
@@ -411,19 +348,5 @@ async def main():
         await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    # async def test_agent():
-    #     agent = Agent(
-    #         task="SF weather",
-    #         llm=ChatOpenAI(model="gpt-4o"),
-    #         browser=browser,
-    #         save_conversation_path="logs/conversation"  
-    #     )
-    #     result = await agent.run()
-    #     print("result", result)
-
-    # # Run both the test agent and main function
-    # async def run_all():
-    #     await asyncio.gather(test_agent())
-
     asyncio.run(main())
 # %%
